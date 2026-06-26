@@ -841,42 +841,80 @@
         }
 
         // ─── SIMULATION RUN ────────────────────────────────────────────────────
+      // ─── SIMULATION RUN ────────────────────────────────────────────────────
         function runSimulation() {
             if (simRunning) return;
             if (!sourceRegion) { addNewsCard('⚠️ Please select a source region first.', 'info'); return; }
+            
             simRunning = true;
             const btn = document.getElementById('runBtn');
             btn.classList.add('running');
             btn.innerHTML = '<span>⟳</span> Running ConvLSTM...';
             const badge = document.getElementById('simBadge');
             badge.style.display = 'block';
-            let day = 0;
-            const interval = setInterval(() => {
-                day++;
-                badge.textContent = `🔄 ConvLSTM Forecasting — Day ${day} of 3`;
-                if (day >= 3) {
-                    clearInterval(interval);
-                    simRunning = false;
-                    simHasRun = true;
-                    btn.classList.remove('running');
-                    btn.innerHTML = '<span>▶</span> Run Digital Twin Simulation';
-                    badge.style.display = 'none';
-                    document.getElementById('diffPill').style.display = 'block';
-                    updateMarkers();
-                    drawArrows(sourceRegion, targetRegion);
-                    updateInfoBar();
-                    updateRiskBars();
-                    updateImpacts();
-                    drawRightPanel();
-                    startAnimation();
-                    const srcLabel = stateData[sourceRegion]?.label || sourceRegion;
-                    const tgtLabel = stateData[targetRegion]?.label || targetRegion;
-                    const td = parseFloat(tempDelta) || 0;
-                    addNewsCard(`✅ Simulation complete. ${srcLabel} anomaly of ${(td >= 0 ? '+' : '') + td.toFixed(1)}°C propagated to ${tgtLabel} (${(td * 0.55).toFixed(1)}°C delta).`, currentScenario === 'heat' ? 'heat' : currentScenario === 'rain' ? 'rain' : currentScenario === 'cyclone' ? 'cyclone' : 'info');
-                    if (currentScenario === 'heat' && td > 0.8) addNewsCard(`🔥 IMD Alert: Severe heatwave conditions likely in ${tgtLabel} within 48hrs.`, 'heat');
-                    if (currentScenario === 'rain') addNewsCard(`🌧 IMD: Heavy rainfall advisory issued for ${tgtLabel} and adjoining districts.`, 'rain');
-                }
-            }, 900);
+
+            // 1. FIRE THE FETCH REQUEST TO THE PYTHON BACKEND
+            fetch('http://127.0.0.1:5000/api/simulate', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({
+                    sourceRegion: sourceRegion,
+                    targetRegion: targetRegion,
+                    currentScenario: currentScenario,
+                    tempDelta: tempDelta,
+                    rainDelta: rainDelta,
+                    windDelta: windDelta
+                })
+            })
+            .then(res => res.json())
+            .then(data => {
+                console.log("Data received from Python backend:", data);
+
+                // 2. Play the visual animation timer, then update UI
+                let day = 0;
+                const interval = setInterval(() => {
+                    day++;
+                    badge.textContent = `🔄 ConvLSTM Forecasting — Day ${day} of 3`;
+                    
+                    if (day >= 3) {
+                        clearInterval(interval);
+                        simRunning = false;
+                        simHasRun = true;
+                        btn.classList.remove('running');
+                        btn.innerHTML = '<span>▶</span> Run Digital Twin Simulation';
+                        badge.style.display = 'none';
+                        document.getElementById('diffPill').style.display = 'block';
+                        
+                        // --- UI UPDATES TRIGGERED HERE ---
+                        // Note for later: You can update these functions to use 'data.analytics' 
+                        // and 'data.spatial_grid' from your Python server!
+                        updateMarkers();
+                        drawArrows(sourceRegion, targetRegion);
+                        updateInfoBar();
+                        updateRiskBars(); 
+                        updateImpacts();  
+                        drawRightPanel(); 
+                        startAnimation();
+                        
+                        // News Cards
+                        const srcLabel = stateData[sourceRegion]?.label || sourceRegion;
+                        const tgtLabel = stateData[targetRegion]?.label || targetRegion;
+                        const td = parseFloat(tempDelta) || 0;
+                        
+                        addNewsCard(`✅ Simulation complete. ${srcLabel} anomaly of ${(td >= 0 ? '+' : '') + td.toFixed(1)}°C propagated to ${tgtLabel} (${(td * 0.55).toFixed(1)}°C delta).`, currentScenario === 'heat' ? 'heat' : currentScenario === 'rain' ? 'rain' : currentScenario === 'cyclone' ? 'cyclone' : 'info');
+                        if (currentScenario === 'heat' && td > 0.8) addNewsCard(`🔥 IMD Alert: Severe heatwave conditions likely in ${tgtLabel} within 48hrs.`, 'heat');
+                        if (currentScenario === 'rain') addNewsCard(`🌧 IMD: Heavy rainfall advisory issued for ${tgtLabel} and adjoining districts.`, 'rain');
+                    }
+                }, 900); // 900ms visual delay per "day"
+            })
+            .catch(err => {
+                console.error("Backend Error:", err);
+                addNewsCard('⚠️ Error: Could not connect to Python backend.', 'heat');
+                simRunning = false;
+                btn.classList.remove('running');
+                btn.innerHTML = '<span>▶</span> Run Digital Twin Simulation';
+                badge.style.display = 'none';
+            });
         }
 
         function addNewsCard(msg, type) {
