@@ -4,6 +4,7 @@ from pydantic import BaseModel
 from contextlib import asynccontextmanager
 import numpy as np
 import os
+import glob
 import uvicorn
 
 # Global variable to hold our loaded historical arrays in RAM
@@ -13,24 +14,60 @@ CLIMATE_DATA = {
     'RAIN': None
 }
 
-DATA_DIR = r"C:\Users\deves\Downloads\IMD_Data_Bulk"
+# --- THE BULLETPROOF PATH FIX ---
+# This finds the exact absolute path where app.py is saved
+BASE_DIR = os.path.dirname(os.path.abspath(__file__))
+
+# Now we anchor the folders to that exact location
+DIR_RAIN = os.path.join(BASE_DIR, "Rainfall_data")
+DIR_TMAX = os.path.join(BASE_DIR, "MAX_Temp")
+DIR_TMIN = os.path.join(BASE_DIR, "MIN_Temp")
+
+def load_imd_binary(folder_path, file_prefix, grid_lat, grid_lon):
+    """Helper function to load and stack IMD binary files into a 3D Tensor."""
+    search_path = os.path.join(folder_path, f"{file_prefix}*.grd")
+    files = glob.glob(search_path)
+    files.sort()
+    
+    if not files:
+        print(f"⚠️ No files found using prefix '{file_prefix}' in {folder_path}")
+        return None
+        
+    print(f"📥 Loading {len(files)} files from {os.path.basename(folder_path)}...")
+    all_years = []
+    
+    for file_path in files:
+        raw_year = np.fromfile(file_path, dtype=np.float32)
+        days_in_year = len(raw_year) // (grid_lat * grid_lon)
+        reshaped_year = raw_year.reshape((days_in_year, grid_lat, grid_lon))
+        all_years.append(reshaped_year)
+        
+    master_tensor = np.concatenate(all_years, axis=0)
+    print(f"✅ Master Tensor Built! Shape: {master_tensor.shape}")
+    return master_tensor
 
 # --- 1. Lifespan Context (Runs on Startup) ---
-# This replaces Flask's @app.before_first_request or app.app_context()
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     print("🚀 Starting up Drishti-Twin Backend...")
     print("Initializing historical climate arrays...")
     try:
-        # Example: Mocking a time series array shape for testing
-        # Replace with real array loading when your .npy files are ready: 
-        # CLIMATE_DATA['TMIN'] = np.load(os.path.join(DATA_DIR, "tmin_compiled.npy"))
-        print("Backend data arrays successfully mapped.")
+        # Load Rainfall (High-Res 129x135 grid)
+        # Change "Rainfall_" to exactly match how your rain files start
+        CLIMATE_DATA['RAIN'] = load_imd_binary(DIR_RAIN, "Rainfall_", 129, 135)
+        
+        # Matches files like: Maxtemp_MaxT_1951.GRD
+        CLIMATE_DATA['TMAX'] = load_imd_binary(DIR_TMAX, "Maxtemp_MaxT_", 31, 31)
+        
+        # ASSUMPTION: Assuming your Min Temp files follow the same naming rule! 
+        # (If they are named differently, just change the text inside the quotes to match)
+        CLIMATE_DATA['TMIN'] = load_imd_binary(DIR_TMIN, "Mintemp_MinT_", 31, 31)
+        
     except Exception as e:
-        print(f"Data loading notice: {e}")
+        print(f"Data loading error: {e}")
+        
     yield
     print("🛑 Shutting down server...")
-
 # Initialize the App
 app = FastAPI(title="Drishti-Twin API", version="2.1", lifespan=lifespan)
 
@@ -69,17 +106,62 @@ async def run_simulation(req: SimulationRequest):
         grid_lat, grid_lon = 129, 135 # Rainfall high-res grid structure
         
     # Create an inference matrix demonstrating spatiotemporal ripples
+    # Create an inference matrix demonstrating spatiotemporal ripples
+    # Generate Spatiotemporal Ripples based on the Scenario
     simulated_grid = []
-    for day in range(1, 6): # 5-day forecast tracking (t+1 to t+5)
-        day_points = []
-        for r in range(0, grid_lat, 2):  # Step by 2 for lighter payload during development
-            for c in range(0, grid_lon, 2):
-                # Simple math calculation to simulate a localized ripple expanding outwards over time
-                base_val = req.tempDelta if req.currentScenario != 'rain' else req.rainDelta
-                decay = 1.0 / (day + 0.5) # Anomaly fades or spreads over days
-                day_points.append([r, c, float(base_val * decay)])
-        simulated_grid.append(day_points)
+    
+    # ─── SCENARIO: MONSOON (RAIN) ───
+    if req.currentScenario == 'rain' and CLIMATE_DATA['RAIN'] is not None:
+        real_day_data = CLIMATE_DATA['RAIN'][150] # Grabbing a historical monsoon day
+        for day in range(1, 6):
+            day_points = []
+            for r in range(0, grid_lat, 2):
+                for c in range(0, grid_lon, 2):
+                    val = float(real_day_data[r, c])
+                    if val != -999.0 and val > 0:
+                        anomaly_multiplier = 1.0 + (req.rainDelta / 100.0)
+                        decay = 1.0 / (day * 0.5 + 0.5) 
+                        day_points.append([r, c, val * anomaly_multiplier * decay])
+            simulated_grid.append(day_points)
+            
+    # ─── SCENARIO: HEATWAVE (TMAX) ───
+    elif req.currentScenario == 'heat' and CLIMATE_DATA['TMAX'] is not None:
+        real_day_data = CLIMATE_DATA['TMAX'][130] # Grabbing a historical summer day (May)
+        for day in range(1, 6):
+            day_points = []
+            for r in range(0, grid_lat, 2):
+                for c in range(0, grid_lon, 2):
+                    val = float(real_day_data[r, c])
+                    if val != -99.9 and val != -999.0: # IMD temp files sometimes use -99.9 for empty
+                        final_temp = val + req.tempDelta
+                        day_points.append([r, c, final_temp])
+            simulated_grid.append(day_points)
 
+    # ─── SCENARIO: COLDWAVE / FOG (TMIN) ───
+    elif req.currentScenario == 'fog' and CLIMATE_DATA['TMIN'] is not None:
+        real_day_data = CLIMATE_DATA['TMIN'][10] # Grabbing a historical winter day (January)
+        for day in range(1, 6):
+            day_points = []
+            for r in range(0, grid_lat, 2):
+                for c in range(0, grid_lon, 2):
+                    val = float(real_day_data[r, c])
+                    if val != -99.9 and val != -999.0:
+                        final_temp = val + req.tempDelta # Usually a negative delta for cold waves
+                        day_points.append([r, c, final_temp])
+            simulated_grid.append(day_points)
+
+    # ─── FALLBACK (If files are missing or for Cyclone) ───
+    else:
+        for day in range(1, 6):
+            day_points = []
+            for r in range(0, grid_lat, 2):
+                for c in range(0, grid_lon, 2):
+                    base_val = req.tempDelta if req.currentScenario != 'rain' else req.rainDelta
+                    decay = 1.0 / (day + 0.5)
+                    day_points.append([r, c, float(base_val * decay)])
+            simulated_grid.append(day_points)
+            
+   
     # 3. Formulate the JSON response to update your UI metrics
     # Note: FastAPI automatically serializes this Python dictionary into JSON for you!
     return {
